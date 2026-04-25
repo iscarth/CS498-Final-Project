@@ -1,124 +1,152 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <signal.h>
-#include <sys/wait.h>
+// This document uses tracl, a Typst style for ACL.
+// See https://typst.app/universe/package/tracl for details.
+#import "@preview/tracl:0.8.1": *
+#import "@preview/pergamon:0.7.1": *
 
-// other process found the number
-volatile int got_sigusr1 = 0;
+#show: doc => acl(doc,
+  anonymous: false,
+  title: [Predicting Gene Therapy Clinical Trial Outcomes: A Comparison of Classifiers on Clinical and Transcriptomic Features],
+  authors: make-authors(
+    (
+      name: "Ian Scarth",
+      affiliation: [University of Hawaii at Hilo\ #email("scarthi@hawaii.edu")]
+    ),
+  ),
+)
 
-// child couldn't find the number 
-volatile int got_sigusr2 = 0;
+#abstract[
+  Will fill this in.
+]
 
-// handler for first flag
-void handler_usr1(int signum) {
-    got_sigusr1 = 1;
-}
+= Introduction <sec:intro>
 
-// handler for second flag
-void handler_usr2(int signum) {
-    got_sigusr2 = 1;
-}
+Gene therapy treats disease at its genetic root, by delivering a corrected gene, silencing a harmful one, or editing the genome directly @high2019. Despite its promise, only about 5.3% of gene therapies that enter Phase I trials reach FDA approval @elsallab2025, and development costs average \$2--5 billion per therapy @dimasi2016 @wong2023. Better tools for predicting which trials will succeed could mitigate these losses and direct funding toward the most promising candidates.
+
+Most prior work on clinical trial outcome prediction has used structured trial metadata as the only feature source @fu2022hint @xiao2022hint @john2023. A smaller body of work has shown that adding _transcriptomic_ data, measurements of how active each gene is in a tissue or cell line, can improve performance @artemov2016 @aliper2023. Transcriptomic profiles are typically summarized either as raw gene-level changes (log2 fold change values, often tens of thousands of features) or as _pathway scores_, where curated groups of biologically related genes are aggregated into a single activity score per pathway. Pathway-level features are lower dimensional and tend to generalize better across labs and platforms.
+
+This paper asks two questions, both framed as ML problems: (1) does adding transcriptomic features to clinical metadata improve gene therapy trial outcome prediction, and (2) is a feedforward neural network competitive with classical classifiers (logistic regression, random forest, XGBoost) on this task? We build a labeled dataset by linking 3,256 gene therapy trials from the Gene Therapy Omnibus (GTO) database @gto2024 to associated transcriptomic experiments through a four-tier cascade matching strategy, and we compare four model classes across three feature configurations.
+
+*Contributions.* (1) A labeled dataset linking gene therapy trial outcomes to matched transcriptomic experiments. (2) A controlled comparison of four classifiers across three feature representations, isolating the contribution of transcriptomic data and the choice of representation. (3) An empirical evaluation of when a neural network outperforms or underperforms tree-based models on a small, mixed-type tabular dataset.
 
 
-int main() {
+= Related Work <sec:related>
 
-    int arr[] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 2, 3, 4, 5, 6, 7, 8, 9};
-    int len = sizeof(arr) / sizeof(arr[0]);
-    int target = 15;
-    int mid = len / 2;
+*Trial outcome prediction.* HINT @fu2022hint @xiao2022hint and follow-on work @john2023 @li2023 predict trial success from registry metadata, reaching AUC values in the 0.60--0.80 range across broad drug classes. None of these methods are gene-therapy specific, and none use transcriptomic features.
 
-    struct sigaction sa1, sa2;
+*Transcriptomic features for outcome modeling.* Artemov et al. @artemov2016 estimated pathway activation scores from cell line perturbation data and reached 0.83 cross-validated accuracy on Phase I/II trials, explicitly showing pathway-level features outperformed gene-level features. Aliper et al. @aliper2023 (inClinico) combined omics with trial design features in a transformer model. Wang et al. @wang2026lira used ssGSEA pathway scores in a model trained on RNA-seq from 1,127 NSCLC patients. None of these target gene therapy specifically, and most operate on patient-level data collected within trials rather than externally matched experiments.
 
-    sa1.sa_handler = handler_usr1;
-    sigemptyset(&sa1.sa_mask);
-    sa1.sa_flags = 0;
-    sigaction(SIGUSR1, &sa1, NULL);
+*Deep learning on tabular data.* Recent benchmarks @grinsztajn2022 @shwartz2022tabular consistently show that gradient-boosted trees match or outperform deep learning on small-to-medium tabular datasets, particularly when features are heterogeneous. Specialized architectures like TabNet @arik2021tabnet and FT-Transformer @gorishniy2021revisiting close the gap on larger datasets, but for low-sample regimes, multilayer perceptrons remain a reasonable baseline. We adopt a feedforward network here as a representative deep model.
 
-    sa2.sa_handler = handler_usr2;
-    sigemptyset(&sa2.sa_mask);
-    sa2.sa_flags = 0;
-    sigaction(SIGUSR2, &sa2, NULL);
 
-    // create child process
-    pid_t childPID = fork();
+= Problem Setup <sec:setup>
 
-    if (childPID == -1) {
-        perror("Fork failed");
-        exit(EXIT_FAILURE);
-    }
+Let $cal(T)$ be the set of gene therapy clinical trials and $cal(E)$ the set of transcriptomic experiments. Each trial $t$ has a clinical metadata vector $bold(m)_t$ (trial phase, therapy type, disease group, major therapy category, and vector type when available, all one-hot encoded). Each experiment $e$ has a gene expression matrix $bold(X)_e$ summarized as a vector of log2 fold changes between treatment and control. A matching function $phi(t) subset.eq cal(E)$ returns the set of experiments linked to trial $t$ (see @sec:methodology); only trials with $phi(t) != emptyset$ are kept.
 
-    // for child process
-    if (childPID == 0) {
-        int i = len - 1;
-        //child goes from last to mid
-        while (i >= mid) {
-            // if parent already found the number:
-            if (got_sigusr1) {
-                printf("CHILD: exiting because Parent found number\n");
-                // _exit for child process
-                _exit(EXIT_SUCCESS);
-            }
-            if (arr[i] == target) {
-                printf("CHILD: found the number at index %d\n", i);
-                // tell parent process: Child found it
-                kill(getppid(), SIGUSR1);
-                // safe exit for child
-                _exit(EXIT_SUCCESS);
-            }
-            // move backward one number
-            i--;
-        }
-        // Child couldn't find number at all
-        if (got_sigusr1) {
-            printf("CHILD: exiting because Parent found number\n");
-            _exit(EXIT_SUCCESS);
+We compare three feature representations:
 
-        }
-        printf("CHILD: couldn't find number, exiting\n");
-        // tell the parent: Child couldn't find it
-        kill(getppid(), SIGUSR2);
-        // safe exit child process
-        _exit(EXIT_SUCCESS);
-    }
-    // for the parent process:
-    else {
-        int i = 0;
-        while (i<mid) {
-            if (got_sigusr1 ==1) {
-                // if child found number before parent:
-                printf("PARENT: exiting because Child found number\n");
-                // clean child data out
-                wait(NULL);
-                // exit parent
-                exit(EXIT_SUCCESS);
+- *Clinical only* ($bold(m)_t$): the metadata baseline.
+- *Clinical + gene* ($[bold(m)_t, bold(x)_t]$): metadata plus the top $n_"gene"$ log2 fold change values by variance, averaged over $phi(t)$.
+- *Clinical + pathway* ($[bold(m)_t, psi_t]$): metadata plus a $p$-dimensional ssGSEA @barbie2009 pathway score vector, averaged over $phi(t)$.
 
-            }
-            if (arr[i] == target) {
-                printf("PARENT: found number at index %d\n", i);
-                // tell the Child: parent found it
-                kill(childPID, SIGUSR1);
-                // clean child data out
-                wait(NULL);
-                //exit parent process
-                exit(EXIT_SUCCESS);
-            }
-            // increase index by 1
-            i++;
-        }
-        // Parent couldn't find number at all
-        printf("PARENT: couldn't find the number, waiting for Child\n");
-        //wait for SIGUSR1 or SIGUSR2 from child
-        pause(); 
-        if (got_sigusr1) {
-            printf("PARENT: exiting because child found number\n");
-        }
-        else if (got_sigusr2) {
-            printf("PARENT: exiting because number couldn't be found by either\n");
-        }
-        // clean out child data
-        wait(NULL);
-        exit(EXIT_SUCCESS);
-    }
-}
+The label $y_t in {0, 1}$ indicates eventual approval anywhere, derived from the GTO `Location_Approved` field, propagated to other trials of the same treatment, and supplemented by OpenFDA brand/generic name lookups. Given a training set $cal(D) = {(bold(f)_t, y_t)}$, the goal is to learn $h: RR^d -> [0, 1]$ that predicts $hat(y)_t = h(bold(f)_t)$. Performance is measured by AUC-ROC.
+
+
+= Methodology <sec:methodology>
+
+== Dataset Construction
+
+Trials and experiments are linked through a four-tier cascade. Tier 1 matches on disease + therapy type + vector + gene; Tier 2 drops the gene constraint; Tier 3 drops vector; Tier 4 generalizes disease to disease group. Each trial is assigned matches at the most specific tier where any are found. Of 6,333 trials, 3,256 are matched (Table @tier-breakdown).
+
+#figure(
+  table(
+    columns: 4,
+    align: (left, right, right, right),
+    stroke: none,
+    table.hline(),
+    table.header([*Tier*], [*Trials*], [*Avg. exps.*], [*Profiles*]),
+    table.hline(),
+    [Tier 1], [194], [8.8], [6],
+    [Tier 2], [178], [5.9], [12],
+    [Tier 3], [160], [9.2], [18],
+    [Tier 4], [2,724], [13.3], [18],
+    table.hline(),
+    [Total], [3,256], [--], [39],
+    table.hline(),
+  ),
+  caption: [Matched trials by cascade tier. "Profiles" is the number of distinct averaged transcriptomic feature vectors, since broader tiers re-use the same set of experiments across many trials.],
+) <tier-breakdown>
+
+For each experiment we compute log2 fold changes against control samples and run ssGSEA against the MSigDB C2 Canonical Pathways collection ($p$ pathways). For each trial $t$, $bold(x)_t$ and $psi_t$ are the means over its matched experiments.
+
+== Models
+
+We compare four classifiers, treating each as a binary outcome predictor over the same feature configurations:
+
+- *Logistic Regression (LR)* with $L_2$ regularization. Linear baseline.
+- *Random Forest (RF)*. Bagged decision trees, no feature interactions assumed beforehand.
+- *XGBoost*. Gradient-boosted trees with $L_1$/$L_2$ regularization. State of the art for small tabular data.
+- *Feedforward Neural Network (FNN)*. The deep learning model of interest.
+
+The FNN is the focus of this paper. It is a fully connected network with $L = 3$ hidden layers, ReLU activations, batch normalization after each linear layer, and dropout (rate $delta = 0.3$) between hidden layers. The output is a single sigmoid unit. Layer widths are $h = (256, 128, 64)$. Training uses Adam with learning rate $eta_"nn" = 10^(-3)$, weight decay $10^(-4)$, batch size 32, binary cross-entropy loss, and early stopping on a held-out validation fold (patience 20 epochs, max 200). Hyperparameters were selected via Optuna on the training folds only, with the test fold held out. Class imbalance is handled by weighted sampling in the data loader.
+
+== Evaluation
+
+We use stratified $K = 5$-fold cross-validation. Each fold's AUC is reported as $"AUC"_k$, and we aggregate as
+
+$ overline("AUC") = 1/K sum_(k=1)^K "AUC"_k, quad sigma_"AUC" = sqrt(1/(K-1) sum_(k=1)^K ("AUC"_k - overline("AUC"))^2). $ <eq:auc>
+
+All four models are evaluated on all three feature configurations, giving a $4 times 3$ comparison matrix.
+
+== Ablations
+
+Two ablations isolate where any improvement comes from. *Ablation 1: feature contribution.* For each model, we compare clinical-only against clinical+gene and clinical+pathway, holding the model fixed. *Ablation 2: depth.* For the FNN, we vary the number of hidden layers $L in {1, 2, 3, 4}$ on the best-performing feature configuration to test whether depth helps on this dataset size.
+
+
+= Experimental Setup <sec:experiments>
+
+The dataset has 3,256 trials matched to 39 unique averaged transcriptomic profiles across four cascade tiers. Class balance after labeling is approximately TODO% positive. Clinical metadata produces $approx 30$ one-hot features after rare-category collapse. Gene features use the top $n_"gene" = 500$ variance-filtered genes. Pathway features use $p = 1{,}329$ MSigDB C2 CP pathways. All continuous features are standardized; one-hot features are passed through unchanged. Cross-validation splits are stratified by label and fixed across all model-feature pairs to keep comparisons paired.
+
+
+= Results <sec:results>
+
+// Table comparing 4 models x 3 feature sets. Will fill in after final runs.
+
+
+= Discussion <sec:discussion>
+
+// Will fill in after final runs.
+
+= Conclusion <sec:conclusion>
+
+// Will fill in after final runs.
+
+
+= Appendix: Notation <appendix:notation>
+
+#figure(
+  table(
+    columns: 2,
+    align: (left, left),
+    stroke: none,
+    table.hline(),
+    table.header([*Symbol*], [*Meaning*]),
+    table.hline(),
+    [$cal(T), cal(E)$], [Sets of trials and experiments],
+    [$phi(t)$], [Experiments matched to trial $t$],
+    [$bold(m)_t$], [Clinical metadata vector],
+    [$bold(x)_t$], [Log2 fold change features],
+    [$psi_t$], [Pathway score vector],
+    [$bold(f)_t$], [Feature vector under chosen configuration],
+    [$y_t, hat(y)_t$], [True / predicted approval label],
+    [$L$], [Number of FNN hidden layers],
+    [$h_l, delta_l$], [Width and dropout rate of hidden layer $l$],
+    [$eta_"nn"$], [FNN learning rate],
+    [$K$], [Number of cross-validation folds],
+    table.hline(),
+  ),
+  caption: [Notation used throughout the paper.],
+) <notation>
+
+// Bibliography (tracl style)
+#add-bib-resource(read("references.bib"))
+#print-acl-bibliography()
