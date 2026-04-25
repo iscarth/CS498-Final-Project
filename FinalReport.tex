@@ -1,0 +1,124 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+// other process found the number
+volatile int got_sigusr1 = 0;
+
+// child couldn't find the number 
+volatile int got_sigusr2 = 0;
+
+// handler for first flag
+void handler_usr1(int signum) {
+    got_sigusr1 = 1;
+}
+
+// handler for second flag
+void handler_usr2(int signum) {
+    got_sigusr2 = 1;
+}
+
+
+int main() {
+
+    int arr[] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 2, 3, 4, 5, 6, 7, 8, 9};
+    int len = sizeof(arr) / sizeof(arr[0]);
+    int target = 15;
+    int mid = len / 2;
+
+    struct sigaction sa1, sa2;
+
+    sa1.sa_handler = handler_usr1;
+    sigemptyset(&sa1.sa_mask);
+    sa1.sa_flags = 0;
+    sigaction(SIGUSR1, &sa1, NULL);
+
+    sa2.sa_handler = handler_usr2;
+    sigemptyset(&sa2.sa_mask);
+    sa2.sa_flags = 0;
+    sigaction(SIGUSR2, &sa2, NULL);
+
+    // create child process
+    pid_t childPID = fork();
+
+    if (childPID == -1) {
+        perror("Fork failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // for child process
+    if (childPID == 0) {
+        int i = len - 1;
+        //child goes from last to mid
+        while (i >= mid) {
+            // if parent already found the number:
+            if (got_sigusr1) {
+                printf("CHILD: exiting because Parent found number\n");
+                // _exit for child process
+                _exit(EXIT_SUCCESS);
+            }
+            if (arr[i] == target) {
+                printf("CHILD: found the number at index %d\n", i);
+                // tell parent process: Child found it
+                kill(getppid(), SIGUSR1);
+                // safe exit for child
+                _exit(EXIT_SUCCESS);
+            }
+            // move backward one number
+            i--;
+        }
+        // Child couldn't find number at all
+        if (got_sigusr1) {
+            printf("CHILD: exiting because Parent found number\n");
+            _exit(EXIT_SUCCESS);
+
+        }
+        printf("CHILD: couldn't find number, exiting\n");
+        // tell the parent: Child couldn't find it
+        kill(getppid(), SIGUSR2);
+        // safe exit child process
+        _exit(EXIT_SUCCESS);
+    }
+    // for the parent process:
+    else {
+        int i = 0;
+        while (i<mid) {
+            if (got_sigusr1 ==1) {
+                // if child found number before parent:
+                printf("PARENT: exiting because Child found number\n");
+                // clean child data out
+                wait(NULL);
+                // exit parent
+                exit(EXIT_SUCCESS);
+
+            }
+            if (arr[i] == target) {
+                printf("PARENT: found number at index %d\n", i);
+                // tell the Child: parent found it
+                kill(childPID, SIGUSR1);
+                // clean child data out
+                wait(NULL);
+                //exit parent process
+                exit(EXIT_SUCCESS);
+            }
+            // increase index by 1
+            i++;
+        }
+        // Parent couldn't find number at all
+        printf("PARENT: couldn't find the number, waiting for Child\n");
+        //wait for SIGUSR1 or SIGUSR2 from child
+        pause(); 
+        if (got_sigusr1) {
+            printf("PARENT: exiting because child found number\n");
+        }
+        else if (got_sigusr2) {
+            printf("PARENT: exiting because number couldn't be found by either\n");
+        }
+        // clean out child data
+        wait(NULL);
+        exit(EXIT_SUCCESS);
+    }
+}
